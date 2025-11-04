@@ -9,26 +9,49 @@ app = Flask(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
-# 🔠 Транслітерація
-TRANSLIT_MAP = {
-    'а':'a','б':'b','в':'v','г':'h','ґ':'g','д':'d','е':'e','є':'ie','ж':'zh',
-    'з':'z','и':'y','і':'i','ї':'i','й':'i','к':'k','л':'l','м':'m','н':'n',
+# 🔠 Мапи транслітерації для укр та рос
+TRANSLIT_UA = {
+    'а':'a','б':'b','в':'v','г':'h','ґ':'g','д':'d','е':'e','є':'ye','ж':'zh',
+    'з':'z','и':'y','і':'i','ї':'yi','й':'y','к':'k','л':'l','м':'m','н':'n',
     'о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts',
-    'ч':'ch','ш':'sh','щ':'shch','ь':'','ю':'iu','я':'ia',
-    'А':'a','Б':'b','В':'v','Г':'h','Ґ':'g','Д':'d','Е':'e','Є':'ie','Ж':'zh',
-    'З':'z','И':'y','І':'i','Ї':'i','Й':'i','К':'k','Л':'l','М':'m','Н':'n',
+    'ч':'ch','ш':'sh','щ':'shch','ь':'','ю':'yu','я':'ya',
+    'А':'a','Б':'b','В':'v','Г':'h','Ґ':'g','Д':'d','Е':'e','Є':'ye','Ж':'zh',
+    'З':'z','И':'y','І':'i','Ї':'yi','Й':'y','К':'k','Л':'l','М':'m','Н':'n',
     'О':'o','П':'p','Р':'r','С':'s','Т':'t','У':'u','Ф':'f','Х':'kh','Ц':'ts',
-    'Ч':'ch','Ш':'sh','Щ':'shch','Ь':'','Ю':'iu','Я':'ia'
+    'Ч':'ch','Ш':'sh','Щ':'shch','Ь':'','Ю':'yu','Я':'ya'
 }
 
+TRANSLIT_RU = {
+    'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z',
+    'и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r',
+    'с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch',
+    'ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya',
+    'А':'a','Б':'b','В':'v','Г':'g','Д':'d','Е':'e','Ё':'yo','Ж':'zh','З':'z',
+    'И':'i','Й':'y','К':'k','Л':'l','М':'m','Н':'n','О':'o','П':'p','Р':'r',
+    'С':'s','Т':'t','У':'u','Ф':'f','Х':'kh','Ц':'ts','Ч':'ch','Ш':'sh','Щ':'shch',
+    'Ъ':'','Ы':'y','Ь':'','Э':'e','Ю':'yu','Я':'ya'
+}
+
+def detect_language(text):
+    if any(ch in 'ґєіїҐЄІЇ' for ch in text):
+        return 'uk'
+    elif any(ch in 'ёъыэЁЪЫЭ' for ch in text):
+        return 'ru'
+    else:
+        # за замовчуванням — укр
+        return 'uk'
+
 def transliterate(text):
-    result = ''.join(TRANSLIT_MAP.get(ch, ch) for ch in text)
+    lang = detect_language(text)
+    table = TRANSLIT_UA if lang == 'uk' else TRANSLIT_RU
+    result = ''.join(table.get(ch, ch) for ch in text)
     result = re.sub(r'[^a-zA-Z0-9]+', '_', result)
-    return re.sub(r'_+', '_', result).strip('_').lower()
+    result = re.sub(r'_+', '_', result).strip('_').lower()
+    return result
 
 @app.route('/', methods=['GET'])
 def index():
-    return "✅ Transliteration bot is running!"
+    return "✅ Transliteration bot (UA+RU) is running!"
 
 @app.route(f"/{BOT_TOKEN}", methods=['POST'])
 def receive_update():
@@ -43,13 +66,20 @@ def receive_update():
     if chat_id and text:
         if text.startswith("/start"):
             reply = (
-                "👋 Привіт! Надішли слово українською — я зроблю транслітерацію, "
-                "як у пошуку Telegram.\n\nНаприклад:\nновини → noviny\nкиївські новини → kyivski_novyny"
+                "👋 Привіт! Я бот для транслітерації 🇺🇦🇷🇺\n"
+                "Надішли слово українською або російською — отримаєш версію, "
+                "як у пошуку Telegram.\n\n"
+                "Наприклад:\nновини → noviny\nкиев → kiev\nпогода україна → pogoda_ukraina"
             )
         else:
-            reply = transliterate(text)
+            translit = transliterate(text)
+            reply = f"🔤 *{text.strip()}* → `{translit}`"
 
-        requests.post(API_URL + "sendMessage", json={"chat_id": chat_id, "text": reply})
+        requests.post(API_URL + "sendMessage", json={
+            "chat_id": chat_id,
+            "text": reply,
+            "parse_mode": "Markdown"
+        })
 
     return "OK", 200
 
