@@ -1,8 +1,5 @@
 from flask import Flask, request
-import requests
-import os
-import json
-import re
+import requests, os, json, re
 
 app = Flask(__name__)
 
@@ -10,14 +7,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 CUSTOM_FILE = "custom.json"
 
-# 🔹 Завантажуємо або створюємо словник користувацьких транслітерацій
+# --- Завантаження словника ---
 if os.path.exists(CUSTOM_FILE):
     with open(CUSTOM_FILE, "r", encoding="utf-8") as f:
         custom_map = json.load(f)
 else:
     custom_map = {}
 
-# 🔠 Мапи транслітерації
+# --- Стан користувачів ---
+user_states = {}  # chat_id -> {"action": "add/edit/delete/translit/import", "data": {}}
+
+# --- Транслітерація ---
 TRANSLIT_UA = {'а':'a','б':'b','в':'v','г':'h','ґ':'g','д':'d','е':'e','є':'ye','ж':'zh',
 'з':'z','и':'y','і':'i','ї':'yi','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p',
 'р':'r','с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch',
@@ -42,9 +42,40 @@ def transliterate(text):
     result = re.sub(r'[^a-zA-Z0-9]+', '_', result)
     return re.sub(r'_+', '_', result).strip('_').lower()
 
+def save_dict():
+    with open(CUSTOM_FILE, "w", encoding="utf-8") as f:
+        json.dump(custom_map, f, ensure_ascii=False, indent=2)
+
+def send_message(chat_id, text, reply_markup=None):
+    requests.post(API_URL + "sendMessage", json={
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+        "reply_markup": reply_markup
+    })
+
+def send_file(chat_id, filename):
+    with open(filename, "rb") as f:
+        requests.post(f"{API_URL}sendDocument", files={"document": f}, data={"chat_id": chat_id})
+
+def get_main_keyboard():
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "📚 Переглянути словник", "callback_data": "list"}],
+            [{"text": "➕ Додати слово", "callback_data": "add"}],
+            [{"text": "✏️ Редагувати слово", "callback_data": "edit"}],
+            [{"text": "🗑️ Видалити слово", "callback_data": "delete"}],
+            [{"text": "🔤 Транслітерувати текст", "callback_data": "translit"}],
+            [{"text": "⬇️ Експорт словника", "callback_data": "export"}],
+            [{"text": "⬆️ Імпорт словника", "callback_data": "import"}]
+        ]
+    }
+    return keyboard
+
 @app.route('/', methods=['GET'])
 def index():
-    return "✅ Transliteration bot (UA+RU+custom) is running!"
+    return "✅ Transliteration bot with full workflow is running!"
 
 @app.route(f"/{BOT_TOKEN}", methods=['POST'])
 def receive_update():
@@ -52,50 +83,145 @@ def receive_update():
     if not update:
         return "No update", 400
 
+    # --- Callback кнопки ---
+    if "callback_query" in update:
+        callback = update["callback_query"]
+        chat_id = callback["message"]["chat"]["id"]
+        data = callback["data"]
+
+        if data == "list":
+            if custom_map:
+                lines = [f"*{k}* → `{v}`" for k,v in custom_map.items()]
+                reply = "📚 Словник:\n" + "\n".join(lines)
+            else:
+                reply = "📭 Словник порожній"
+            send_message(chat_id, reply)
+        elif data == "export":
+            if custom_map:
+                filename = "custom_export.txt"
+                with open(filename, "w", encoding="utf-8") as f:
+                    for k,v in custom_map.items():
+                        f.write(f"{k} {v}\n")
+                send_file(chat_id, filename)
+            else:
+                send_message(chat_id, "📭 Словник порожній")
+        else:
+            # Дії, що очікують введення користувача
+            user_states[chat_id] = {"action": data, "data": {}}
+            action_text = {
+                "add": "Введіть слово та його транслітерацію через пробіл, наприклад:\n`київ kyiv`",
+                "edit": "Введіть слово та нову транслітерацію через пробіл, наприклад:\n`київ kyiv_new`",
+                "delete": "Введіть слово, яке бажаєте видалити",
+                "translit": "Введіть текст для транслітерації",
+                "import": "📤 Надішліть текстовий файл (.txt) зі словником. Формат: `слово translit` на рядок."
+            }
+            send_message(chat_id, action_text.get(data, "Введіть дані для дії"))
+        return "OK", 200
+
+    # --- Текстові повідомлення ---
     message = update.get("message", {})
     chat_id = message.get("chat", {}).get("id")
     text = message.get("text", "").strip()
 
-    if chat_id and text:
-        if text.startswith("/start"):
-            reply = (
-                "👋 Привіт! Я бот для транслітерації 🇺🇦🇷🇺\n"
-                "Надішли слово українською або російською — я зроблю його транслітерацію.\n\n"
-                "📝 Щоб додати власний варіант:\n`/add слово translit`\n"
-                "Приклад:\n`/add київ kyiv`"
-            )
-        elif text.startswith("/add "):
+    if not chat_id or not (text or "document" in message):
+        return "No text", 200
+
+    # --- /start ---
+    if text.startswith("/start"):
+        send_message(chat_id, "👋 Привіт! Використовуй кнопки для керування словником або надішли слово для транслітерації.", reply_markup=get_main_keyboard())
+        return "OK", 200
+
+    state = user_states.get(chat_id)
+
+    # --- Імпорт файлу ---
+    if "document" in message and state and state["action"] == "import":
+        file_id = message["document"]["file_id"]
+        file_info = requests.get(f"{API_URL}getFile?file_id={file_id}").json()
+        file_path = file_info["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        r = requests.get(file_url)
+        content = r.content.decode("utf-8")
+        added = 0
+        for line in content.splitlines():
+            if line.strip():
+                parts = line.strip().split(maxsplit=1)
+                if len(parts) == 2:
+                    custom_map[parts[0].lower()] = parts[1].lower()
+                    added += 1
+        save_dict()
+        user_states.pop(chat_id, None)
+        send_message(chat_id, f"✅ Імпортовано {added} слів зі словника")
+        return "OK", 200
+
+    # --- Обробка станів ---
+    if state:
+        action = state["action"]
+        reply = ""
+
+        if action == "add":
             try:
-                parts = text.split(maxsplit=2)
-                orig = parts[1].lower()
-                trans = parts[2].lower()
-                custom_map[orig] = trans
-                with open(CUSTOM_FILE, "w", encoding="utf-8") as f:
-                    json.dump(custom_map, f, ensure_ascii=False, indent=2)
-                reply = f"✅ Додано: *{orig}* → `{trans}`"
+                word, translit_word = text.split(maxsplit=1)
+                custom_map[word.lower()] = translit_word.lower()
+                save_dict()
+                reply = f"✅ Додано: *{word}* → `{translit_word}`"
             except Exception:
-                reply = "⚠️ Формат команди: `/add слово translit`"
-        else:
+                reply = "⚠️ Формат неправильний. Введіть у форматі: `слово translit`"
+
+        elif action == "edit":
+            try:
+                word, translit_word = text.split(maxsplit=1)
+                key = word.lower()
+                if key in custom_map:
+                    custom_map[key] = translit_word.lower()
+                    save_dict()
+                    reply = f"✏️ Змінено: *{word}* → `{translit_word}`"
+                else:
+                    reply = f"⚠️ Слова *{word}* немає в словнику"
+            except Exception:
+                reply = "⚠️ Формат неправильний. Введіть у форматі: `слово translit`"
+
+        elif action == "delete":
             key = text.lower()
             if key in custom_map:
-                translit = custom_map[key]
-                source = "📘 З твого словника"
+                del custom_map[key]
+                save_dict()
+                reply = f"🗑️ Видалено слово *{text}*"
             else:
-                translit = transliterate(text)
-                source = "🤖 Автоматична транслітерація"
-            search_url = f"https://t.me/s/{translit}"
-            reply = (
-                f"🔤 *{text}* → `{translit}`\n"
-                f"{source}\n\n"
-                f"🔗 [Пошук у Telegram]({search_url})"
-            )
+                reply = f"⚠️ Слова *{text}* немає в словнику"
 
-        requests.post(API_URL + "sendMessage", json={
-            "chat_id": chat_id,
-            "text": reply,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
-        })
+        elif action == "translit":
+            words = text.split()
+            result_words = []
+            for w in words:
+                lw = w.lower()
+                if lw in custom_map:
+                    result_words.append(custom_map[lw])
+                else:
+                    result_words.append(transliterate(w))
+            translit_text = "_".join(result_words)
+            reply = f"🔤 {text} → `{translit_text}`"
+
+        user_states.pop(chat_id, None)
+        send_message(chat_id, reply)
+        return "OK", 200
+
+    # --- Автоматична транслітерація ---
+    if text:
+        key = text.lower()
+        if key in custom_map:
+            translit = custom_map[key]
+            source = "📘 З твого словника"
+        else:
+            translit = transliterate(text)
+            source = "🤖 Автоматична транслітерація"
+
+        search_url = f"https://t.me/s/{translit}"
+        reply = (
+            f"🔤 *{text}* → `{translit}`\n"
+            f"{source}\n\n"
+            f"🔗 [Пошук у Telegram]({search_url})"
+        )
+        send_message(chat_id, reply)
 
     return "OK", 200
 
