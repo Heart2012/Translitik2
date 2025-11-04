@@ -1,5 +1,5 @@
 from flask import Flask, request
-import requests, os, json, re
+import requests, os, json, re, threading
 
 app = Flask(__name__)
 
@@ -15,7 +15,7 @@ else:
     custom_map = {}
 
 # --- Стан користувачів ---
-user_states = {}  # chat_id -> {"action": "add/edit/delete/translit/import", "data": {}}
+user_states = {}
 
 # --- Транслітерація ---
 TRANSLIT_UA = {'а':'a','б':'b','в':'v','г':'h','ґ':'g','д':'d','е':'e','є':'ye','ж':'zh',
@@ -46,18 +46,31 @@ def save_dict():
     with open(CUSTOM_FILE, "w", encoding="utf-8") as f:
         json.dump(custom_map, f, ensure_ascii=False, indent=2)
 
+# --- Асинхронна відправка ---
+def async_send(url, payload=None, files=None):
+    def task():
+        try:
+            if files:
+                requests.post(url, data=payload, files=files)
+            else:
+                requests.post(url, json=payload)
+        except Exception as e:
+            print("Error sending message:", e)
+    threading.Thread(target=task).start()
+
 def send_message(chat_id, text, reply_markup=None):
-    requests.post(API_URL + "sendMessage", json={
+    payload = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "Markdown",
         "disable_web_page_preview": True,
         "reply_markup": reply_markup
-    })
+    }
+    async_send(API_URL + "sendMessage", payload)
 
 def send_file(chat_id, filename):
     with open(filename, "rb") as f:
-        requests.post(f"{API_URL}sendDocument", files={"document": f}, data={"chat_id": chat_id})
+        async_send(f"{API_URL}sendDocument", payload={"chat_id": chat_id}, files={"document": f})
 
 def get_main_keyboard():
     keyboard = {
@@ -75,13 +88,15 @@ def get_main_keyboard():
 
 @app.route('/', methods=['GET'])
 def index():
-    return "✅ Transliteration bot with full workflow is running!"
+    return "✅ Transliteration bot is running!"
 
 @app.route(f"/{BOT_TOKEN}", methods=['POST'])
 def receive_update():
     update = request.get_json()
     if not update:
         return "No update", 400
+
+    print("Received update:", update)  # Debug
 
     # --- Callback кнопки ---
     if "callback_query" in update:
@@ -91,7 +106,7 @@ def receive_update():
         callback_id = callback["id"]
 
         # Підтверджуємо Telegram, щоб кнопка не зависала
-        requests.post(API_URL + "answerCallbackQuery", json={"callback_query_id": callback_id})
+        async_send(API_URL + "answerCallbackQuery", {"callback_query_id": callback_id})
 
         if data == "list":
             if custom_map:
@@ -110,7 +125,6 @@ def receive_update():
             else:
                 send_message(chat_id, "📭 Словник порожній")
         else:
-            # Дії, що очікують введення користувача
             user_states[chat_id] = {"action": data, "data": {}}
             action_text = {
                 "add": "Введіть слово та його транслітерацію через пробіл, наприклад:\n`київ kyiv`",
@@ -130,7 +144,6 @@ def receive_update():
     if not chat_id or not (text or "document" in message):
         return "No text", 200
 
-    # --- /start ---
     if text and text.startswith("/start"):
         send_message(chat_id, "👋 Привіт! Використовуй кнопки для керування словником або надішли слово для транслітерації.", reply_markup=get_main_keyboard())
         return "OK", 200
@@ -162,17 +175,14 @@ def receive_update():
         action = state["action"]
         reply = ""
 
-        if action == "add":
-            try:
+        try:
+            if action == "add":
                 word, translit_word = text.split(maxsplit=1)
                 custom_map[word.lower()] = translit_word.lower()
                 save_dict()
                 reply = f"✅ Додано: *{word}* → `{translit_word}`"
-            except Exception:
-                reply = "⚠️ Формат неправильний. Введіть у форматі: `слово translit`"
 
-        elif action == "edit":
-            try:
+            elif action == "edit":
                 word, translit_word = text.split(maxsplit=1)
                 key = word.lower()
                 if key in custom_map:
@@ -181,29 +191,29 @@ def receive_update():
                     reply = f"✏️ Змінено: *{word}* → `{translit_word}`"
                 else:
                     reply = f"⚠️ Слова *{word}* немає в словнику"
-            except Exception:
-                reply = "⚠️ Формат неправильний. Введіть у форматі: `слово translit`"
 
-        elif action == "delete":
-            key = text.lower()
-            if key in custom_map:
-                del custom_map[key]
-                save_dict()
-                reply = f"🗑️ Видалено слово *{text}*"
-            else:
-                reply = f"⚠️ Слова *{text}* немає в словнику"
-
-        elif action == "translit":
-            words = text.split()
-            result_words = []
-            for w in words:
-                lw = w.lower()
-                if lw in custom_map:
-                    result_words.append(custom_map[lw])
+            elif action == "delete":
+                key = text.lower()
+                if key in custom_map:
+                    del custom_map[key]
+                    save_dict()
+                    reply = f"🗑️ Видалено слово *{text}*"
                 else:
-                    result_words.append(transliterate(w))
-            translit_text = "_".join(result_words)
-            reply = f"🔤 {text} → `{translit_text}`"
+                    reply = f"⚠️ Слова *{text}* немає в словнику"
+
+            elif action == "translit":
+                words = text.split()
+                result_words = []
+                for w in words:
+                    lw = w.lower()
+                    if lw in custom_map:
+                        result_words.append(custom_map[lw])
+                    else:
+                        result_words.append(transliterate(w))
+                translit_text = "_".join(result_words)
+                reply = f"🔤 {text} → `{translit_text}`"
+        except Exception:
+            reply = "⚠️ Сталася помилка. Перевірте формат введення."
 
         user_states.pop(chat_id, None)
         send_message(chat_id, reply)
@@ -218,13 +228,8 @@ def receive_update():
         else:
             translit = transliterate(text)
             source = "🤖 Автоматична транслітерація"
-
         search_url = f"https://t.me/s/{translit}"
-        reply = (
-            f"🔤 *{text}* → `{translit}`\n"
-            f"{source}\n\n"
-            f"🔗 [Пошук у Telegram]({search_url})"
-        )
+        reply = f"🔤 *{text}* → `{translit}`\n{source}\n\n🔗 [Пошук у Telegram]({search_url})"
         send_message(chat_id, reply)
 
     return "OK", 200
