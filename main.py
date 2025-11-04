@@ -11,6 +11,8 @@ UNKNOWN_FILE = "unknown_words.txt"
 
 app = Flask(__name__)
 
+print("BOT_TOKEN:", TOKEN)  # Перевірка токена
+
 # === Стан користувачів ===
 user_states = {}
 
@@ -95,7 +97,7 @@ def parse_multiline_input(text):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = request.get_json()
-    print("Received update:", update)
+    print("Received update:", json.dumps(update, ensure_ascii=False, indent=2))
 
     message = update.get("message", {})
     text = message.get("text", "").strip()
@@ -198,60 +200,3 @@ def webhook():
 
             elif action == "edit":
                 pairs = parse_multiline_input(text)
-                edited = 0
-                for w,t in pairs:
-                    if w in custom_map:
-                        custom_map[w] = t
-                        edited += 1
-                save_dict()
-                reply = f"✏️ Змінено {edited} слів."
-
-            elif action == "delete":
-                lines = [l.strip().lower() for l in text.splitlines() if l.strip()]
-                deleted = 0
-                for w in lines:
-                    if w in custom_map:
-                        del custom_map[w]
-                        deleted += 1
-                save_dict()
-                reply = f"🗑️ Видалено {deleted} слів."
-
-            elif action == "translit":
-                lines = [l.strip() for l in text.splitlines() if l.strip()]
-                results = []
-                for line in lines:
-                    words = line.split()
-                    result_words = []
-                    for w in words:
-                        lw = w.lower()
-                        if lw in custom_map:
-                            result_words.append(custom_map[lw])
-                        else:
-                            save_unknown(lw)
-                            result_words.append(f"⚠️{transliterate(w)}⚠️")
-                    results.append("_".join(result_words))
-                reply = "🔤 Результат:\n" + "\n".join(results)
-
-        except Exception as e:
-            reply = f"⚠️ Помилка: {e}"
-
-        user_states.pop(chat_id, None)
-        send_message(chat_id, reply, get_main_keyboard())
-        return "OK", 200
-
-    return "OK", 200
-
-# === Веб ===
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ Bot is running!"
-
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    url = f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={WEBHOOK_URL}"
-    r = requests.get(url)
-    return r.text
-
-# === Запуск ===
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
