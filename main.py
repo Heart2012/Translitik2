@@ -1,179 +1,156 @@
-import os
 from flask import Flask, request
-import telebot
-from telebot import types
+import json
+import os
+import requests
+
+TOKEN = "ТВОЙ_ТОКЕН_ТУТ"
+BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ТВОЙ_ТОКЕН_ТУТ")
-bot = telebot.TeleBot(BOT_TOKEN)
-
-DICT_FILE = "dictionary.txt"
+DICTIONARY_FILE = "dictionary.txt"
 UNKNOWN_FILE = "unknown.txt"
 
-dictionary = {}
+# ---------- Функції роботи зі словником ----------
 
-
-# --- Завантаження словника ---
 def load_dictionary():
-    dictionary.clear()
-    if not os.path.exists(DICT_FILE):
-        open(DICT_FILE, "w").close()
-    with open(DICT_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            if "//" in line:
-                key, val = line.strip().split("//", 1)
-                dictionary[key.strip()] = val.strip()
+    dictionary = {}
+    if os.path.exists(DICTIONARY_FILE):
+        with open(DICTIONARY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "//" in line:
+                    phrase, translit = line.split("//", 1)
+                    dictionary[phrase.strip().lower()] = translit.strip()
+    return dictionary
 
 
-# --- Збереження словника ---
-def save_dictionary():
-    with open(DICT_FILE, "w", encoding="utf-8") as f:
-        for k, v in dictionary.items():
-            f.write(f"{k}//{v}\n")
+def save_dictionary(dictionary):
+    with open(DICTIONARY_FILE, "w", encoding="utf-8") as f:
+        for phrase, translit in dictionary.items():
+            f.write(f"{phrase}//{translit}\n")
 
 
-load_dictionary()
+def add_to_unknown(text):
+    with open(UNKNOWN_FILE, "a", encoding="utf-8") as f:
+        f.write(text.strip() + "\n")
 
 
-# --- Кнопки ---
-def main_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("📘 Словник", "➕ Додати", "📤 Експорт", "📥 Імпорт")
-    markup.add("📄 Unknown", "🧹 Очистити unknown", "🔄 Перезавантажити словник")
-    return markup
+def clear_unknown():
+    open(UNKNOWN_FILE, "w", encoding="utf-8").close()
 
 
-# --- Головна логіка ---
-@bot.message_handler(commands=["start"])
-def start(msg):
-    bot.send_message(
-        msg.chat.id,
-        "👋 Привіт! Я бот для транслітерації.\nВведи фразу, і я заміню все, що знайду в словнику.",
-        reply_markup=main_menu()
-    )
+def load_unknown():
+    if not os.path.exists(UNKNOWN_FILE):
+        return "unknown.txt порожній."
+    with open(UNKNOWN_FILE, "r", encoding="utf-8") as f:
+        return f.read() or "unknown.txt порожній."
 
+# ---------- Транслітерація ----------
 
-@bot.message_handler(func=lambda m: True)
-def handle_message(msg):
-    text = msg.text.strip()
-
-    if text == "📘 Словник":
-        if not dictionary:
-            bot.send_message(msg.chat.id, "Словник порожній.", reply_markup=main_menu())
-        else:
-            dict_text = "\n".join([f"{k} // {v}" for k, v in dictionary.items()])
-            bot.send_message(msg.chat.id, f"📘 Твій словник:\n\n{dict_text}", reply_markup=main_menu())
-
-    elif text == "📤 Експорт":
-        if os.path.exists(DICT_FILE):
-            with open(DICT_FILE, "rb") as f:
-                bot.send_document(msg.chat.id, f, visible_file_name="dictionary.txt")
-        else:
-            bot.send_message(msg.chat.id, "Файл словника не знайдено.", reply_markup=main_menu())
-
-    elif text == "📄 Unknown":
-        if os.path.exists(UNKNOWN_FILE) and os.path.getsize(UNKNOWN_FILE) > 0:
-            with open(UNKNOWN_FILE, "rb") as f:
-                bot.send_document(msg.chat.id, f, visible_file_name="unknown.txt")
-        else:
-            bot.send_message(msg.chat.id, "Файл unknown.txt порожній або не створений.", reply_markup=main_menu())
-
-    elif text == "🧹 Очистити unknown":
-        open(UNKNOWN_FILE, "w", encoding="utf-8").close()
-        bot.send_message(msg.chat.id, "✅ Файл unknown.txt очищено.", reply_markup=main_menu())
-
-    elif text == "🔄 Перезавантажити словник":
-        load_dictionary()
-        bot.send_message(msg.chat.id, "🔁 Словник успішно перезавантажено!", reply_markup=main_menu())
-
-    elif text == "➕ Додати":
-        bot.send_message(
-            msg.chat.id,
-            "Відправ нові фрази у форматі:\n<code>фраза // транслітерація</code>\nМожна кілька рядків одразу.",
-            parse_mode="HTML",
-            reply_markup=main_menu()
-        )
-        bot.register_next_step_handler(msg, add_entries)
-
-    elif text == "📥 Імпорт":
-        bot.send_message(
-            msg.chat.id,
-            "📎 Надішли .txt файл словника для імпорту (формат: фраза // транслітерація).",
-            reply_markup=main_menu()
-        )
-        bot.register_next_step_handler(msg, import_file)
-
-    else:
-        translit_text = apply_translit(text)
-        bot.send_message(msg.chat.id, translit_text, reply_markup=main_menu())
-
-
-# --- Додавання нових записів ---
-def add_entries(msg):
-    lines = msg.text.strip().split("\n")
-    added = 0
-    for line in lines:
-        if "//" in line:
-            k, v = line.split("//", 1)
-            dictionary[k.strip()] = v.strip()
-            added += 1
-    save_dictionary()
-    bot.send_message(msg.chat.id, f"✅ Додано {added} фраз(и) до словника.", reply_markup=main_menu())
-
-
-# --- Імпорт файлу ---
-def import_file(msg):
-    if not msg.document:
-        bot.send_message(msg.chat.id, "❌ Це не файл. Надішли .txt документ.", reply_markup=main_menu())
-        return
-
-    file_info = bot.get_file(msg.document.file_id)
-    downloaded = bot.download_file(file_info.file_path)
-    with open(DICT_FILE, "wb") as f:
-        f.write(downloaded)
-
-    load_dictionary()
-    bot.send_message(msg.chat.id, "✅ Словник імпортовано!", reply_markup=main_menu())
-
-
-# --- Транслітерація ---
-def apply_translit(text):
+def transliterate_text(text, dictionary):
     result = text
-    unknown_phrases = []
-
-    # заміна фраз зі словника (найдовші — спочатку)
-    for phrase in sorted(dictionary.keys(), key=len, reverse=True):
-        if phrase in result:
-            result = result.replace(phrase, dictionary[phrase])
-
-    # пошук невідомих фраз
+    for phrase, translit in dictionary.items():
+        if phrase.lower() in result.lower():
+            result = result.replace(phrase, translit)
+    # позначення невідомих
     words = text.split()
     for w in words:
-        if all(k not in w for k in dictionary.keys()):
+        found = False
+        for phrase in dictionary.keys():
+            if w.lower() in phrase.lower():
+                found = True
+                break
+        if not found and "[" + w + "]" not in result:
             result = result.replace(w, f"[{w}]")
-            unknown_phrases.append(w)
-
-    # запис unknown
-    if unknown_phrases:
-        with open(UNKNOWN_FILE, "a", encoding="utf-8") as f:
-            for w in unknown_phrases:
-                f.write(w + "\n")
-
+            add_to_unknown(w)
     return result
 
+# ---------- Кнопки ----------
 
-# --- Flask webhook ---
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def main_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "📘 Переглянути словник"}, {"text": "➕ Додати фрази"}],
+            [{"text": "📤 Експорт словника"}, {"text": "📥 Імпорт словника"}],
+            [{"text": "❓ Unknown.txt"}, {"text": "🧹 Очистити Unknown"}],
+        ],
+        "resize_keyboard": True,
+        "persistent": True
+    }
+
+# ---------- Telegram логіка ----------
+
+@app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    bot.process_new_updates([telebot.types.Update.de_json(request.data.decode("utf-8"))])
-    return "OK", 200
+    data = request.get_json()
+    if not data:
+        return "No data"
 
+    if "message" in data:
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "").strip()
+
+        dictionary = load_dictionary()
+
+        if text == "/start":
+            send_message(chat_id, "👋 Привіт! Я бот для транслітерації.\nВикористовуй кнопки нижче:", main_keyboard())
+        elif text == "📘 Переглянути словник":
+            if dictionary:
+                dict_text = "\n".join([f"{k} // {v}" for k, v in dictionary.items()])
+                send_message(chat_id, f"📘 Словник:\n\n{dict_text}", main_keyboard())
+            else:
+                send_message(chat_id, "📖 Словник порожній.", main_keyboard())
+        elif text == "📤 Експорт словника":
+            send_file(chat_id, DICTIONARY_FILE)
+        elif text == "📥 Імпорт словника":
+            send_message(chat_id, "📥 Надішли мені файл у форматі `фраза//трансліт`, кожна пара з нового рядка.", main_keyboard())
+        elif text == "➕ Додати фрази":
+            send_message(chat_id, "Введи нові фрази у форматі:\n`фраза // трансліт`\nКожна пара — з нового рядка.", main_keyboard())
+        elif text == "❓ Unknown.txt":
+            send_message(chat_id, f"🧩 Невідомі фрази:\n\n{load_unknown()}", main_keyboard())
+        elif text == "🧹 Очистити Unknown":
+            clear_unknown()
+            send_message(chat_id, "✅ Файл unknown.txt очищено!", main_keyboard())
+        elif "//" in text and "\n" in text:
+            # додавання кількох фраз
+            added = 0
+            for line in text.splitlines():
+                if "//" in line:
+                    phrase, translit = line.split("//", 1)
+                    dictionary[phrase.strip().lower()] = translit.strip()
+                    added += 1
+            save_dictionary(dictionary)
+            send_message(chat_id, f"✅ Додано {added} фраз(и) у словник!", main_keyboard())
+        else:
+            result = transliterate_text(text, dictionary)
+            send_message(chat_id, result, main_keyboard())
+
+    return "OK"
+
+# ---------- Допоміжні функції ----------
+
+def send_message(chat_id, text, keyboard=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if keyboard:
+        payload["reply_markup"] = json.dumps(keyboard)
+    requests.post(f"{BASE_URL}/sendMessage", data=payload)
+
+
+def send_file(chat_id, file_path):
+    if os.path.exists(file_path):
+        with open(file_path, "rb") as f:
+            requests.post(f"{BASE_URL}/sendDocument", data={"chat_id": chat_id}, files={"document": f})
+    else:
+        send_message(chat_id, f"Файл {file_path} не знайдено.", main_keyboard())
+
+# ---------- Flask тест ----------
 
 @app.route("/")
 def index():
-    return "Bot is running!"
+    return "✅ Translit bot працює!"
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    app.run(host="0.0.0.0", port=10000)
