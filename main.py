@@ -22,6 +22,7 @@ TRANSLIT_UA = {'а':'a','б':'b','в':'v','г':'h','ґ':'g','д':'d','е':'e','�
 'з':'z','и':'y','і':'i','ї':'yi','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p',
 'р':'r','с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch',
 'ь':'','ю':'yu','я':'ya'}
+
 TRANSLIT_RU = {'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z',
 'и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t',
 'у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch','ъ':'','ы':'y','ь':'',
@@ -63,8 +64,6 @@ def send_message(chat_id, text, reply_markup=None):
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-        "reply_markup": reply_markup
         "disable_web_page_preview": True
     }
     if reply_markup:
@@ -99,7 +98,6 @@ def receive_update():
     if not update:
         return "No update", 400
 
-    print("Received update:", update)  # Debug
     print("Received update:", update)
 
     # --- Callback кнопки ---
@@ -109,13 +107,11 @@ def receive_update():
         data = callback["data"]
         callback_id = callback["id"]
 
-        # Підтверджуємо Telegram, щоб кнопка не зависала
-        # Підтвердження кнопки
         async_send(API_URL + "answerCallbackQuery", {"callback_query_id": callback_id})
 
         if data == "list":
             if custom_map:
-                lines = [f"*{k}* → `{v}`" for k,v in custom_map.items()]
+                lines = [f"*{k}* → `{v}`" for k, v in custom_map.items()]
                 reply = "📚 Словник:\n" + "\n".join(lines)
             else:
                 reply = "📭 Словник порожній"
@@ -124,7 +120,7 @@ def receive_update():
             if custom_map:
                 filename = "custom_export.txt"
                 with open(filename, "w", encoding="utf-8") as f:
-                    for k,v in custom_map.items():
+                    for k, v in custom_map.items():
                         f.write(f"{k} {v}\n")
                 send_file(chat_id, filename)
             else:
@@ -240,5 +236,4 @@ def receive_update():
     return "OK", 200
 
 if __name__ == "__main__":
-    # ✅ Важливо: дві закриваючі дужки!
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
