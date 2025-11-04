@@ -8,11 +8,11 @@ from flask import Flask, request
 TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN"
 CUSTOM_DICT_FILE = "custom_dict.json"
 UNKNOWN_FILE = "unknown_words.txt"
-SEP = "="  # роздільник для словника, можна змінити на ":" або "->"
+SEP = "="  # роздільник для словника, можна змінити
 
 app = Flask(__name__)
 user_states = {}  # стан користувачів
-custom_map = {}
+custom_map = {}   # словник за категоріями
 
 # === Завантаження словника ===
 def load_dict():
@@ -95,34 +95,51 @@ def send_file(chat_id, filename):
     with open(filename, "rb") as f:
         requests.post(url, data={"chat_id": chat_id}, files={"document": f})
 
-# === Парсинг багаторядкового вводу для словника ===
-def parse_multiline_input(text):
+# === Парсинг багаторядкового вводу для словника з категорією ===
+# Формат рядка: Категорія Слово=трансліт
+def parse_multiline_input_with_category(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    pairs = []
+    parsed = []
     for line in lines:
-        if SEP in line:
-            parts = line.split(SEP,1)
-            pairs.append((parts[0].strip().lower(), parts[1].strip()))
-    return pairs
+        if " " in line and SEP in line:
+            cat, rest = line.split(" ",1)
+            word, translit_word = rest.split(SEP,1)
+            parsed.append((cat.strip(), word.strip().lower(), translit_word.strip()))
+    return parsed
 
-# === Трансліт рядка по словах з перевіркою словника ===
+# === Перевірка українських літер та апострофу ʼ ===
+def has_ukrainian_letters(text):
+    return bool(re.search(r"[а-яєіїґА-ЯЄІЇҐʼ]", text))
+
+# === Трансліт рядка з перевіркою словника та склеєних слів ===
 def translit_text_line(text):
-    result_words = []
-    parts = re.findall(r'\w+|[^\w\s]', text, re.UNICODE)  # слова + роздільники
-
-    for w in parts:
-        lw = w.lower()
-        if lw in custom_map:
-            translit_word = custom_map[lw]
-            remove_unknown(lw)
-        elif re.match(r'\w+', w):  # слова
-            translit_word = f"[{transliterate(w)}]"
-            save_unknown(w)
-        else:  # роздільники залишаємо
-            translit_word = w
-        result_words.append(translit_word)
-
-    return "".join(result_words)
+    lw = text.lower()
+    result = ""
+    i = 0
+    while i < len(lw):
+        match = None
+        for j in range(len(lw), i, -1):
+            part = lw[i:j]
+            found = None
+            for cat in custom_map:
+                if part in custom_map[cat]:
+                    found = custom_map[cat][part]
+                    break
+            if found:
+                match = found
+                break
+        if match:
+            result += match
+            remove_unknown(part)
+            i += len(part)
+        else:
+            if re.match(r'\w', lw[i]):
+                result += f"[{lw[i]}]"
+                save_unknown(lw[i])
+            else:
+                result += lw[i]
+            i += 1
+    return result
 
 # === Основний вебхук ===
 @app.route("/webhook", methods=["POST"])
@@ -136,7 +153,11 @@ def webhook():
 
     state = user_states.get(chat_id)
 
-    # --- Кнопки ---
+    # --- Попередження для українських літер ---
+    if text and has_ukrainian_letters(text):
+        send_message(chat_id, "⚠️ У тексті є українські літери або апостроф ʼ. Бот виконає транслітерацію з української.", get_main_keyboard())
+
+    # --- Дії кнопок ---
     buttons = {
         "📚 Словник":"list",
         "🔤 Транслітерація":"translit",
@@ -155,132 +176,54 @@ def webhook():
     if text in buttons:
         action = buttons[text]
 
-        # --- Дії кнопок ---
         if action == "list":
-            reply = "📚 *Словник:*\n" + "\n".join(f"*{k}*{SEP}`{v}`" for k,v in custom_map.items()) if custom_map else "📭 Словник порожній."
+            if not custom_map:
+                reply = "📭 Словник порожній."
+            else:
+                reply = ""
+                for cat, words in custom_map.items():
+                    reply += f"*{cat}*\n"
+                    for k,v in words.items():
+                        reply += f"{k}{SEP}`{v}`\n"
             send_message(chat_id, reply, get_main_keyboard())
             return "OK",200
 
-        elif action == "export":
-            if custom_map:
-                filename = "custom_export.txt"
-                with open(filename,"w",encoding="utf-8") as f:
-                    for k,v in custom_map.items():
-                        f.write(f"{k}{SEP}{v}\n")
-                send_file(chat_id, filename)
-            else:
-                send_message(chat_id,"📭 Словник порожній.",get_main_keyboard())
-            return "OK",200
-
-        elif action == "unknown":
-            if os.path.exists(UNKNOWN_FILE):
-                with open(UNKNOWN_FILE,"r",encoding="utf-8") as f:
-                    lines = [l.strip() for l in f.readlines() if l.strip()]
-                reply = "⚠️ *Невідомі слова:*\n" + "\n".join(f"[{w}]" for w in lines) if lines else "✅ Невідомих слів немає."
-            else:
-                reply = "✅ Невідомих слів немає."
-            send_message(chat_id,reply,get_main_keyboard())
-            return "OK",200
-
-        elif action == "unknown_clear":
-            clear_unknown()
-            send_message(chat_id,"✅ Список невідомих слів очищено.",get_main_keyboard())
-            return "OK",200
-
-        elif action == "import_unknown_manual":
-            if os.path.exists(UNKNOWN_FILE):
-                with open(UNKNOWN_FILE,"r",encoding="utf-8") as f:
-                    lines = [l.strip() for l in f.readlines() if l.strip()]
-                if lines:
-                    example = "\n".join([f"{w}{SEP}{transliterate(w)}" for w in lines])
-                    send_message(chat_id,"Вставте ручну транслітерацію або підтвердіть авто, відправивши:\n"+example,get_main_keyboard())
-                    user_states[chat_id]={"action":"import_unknown_manual","data":{"lines":lines}}
-            else:
-                send_message(chat_id,"⚠️ Немає невідомих слів для додавання.",get_main_keyboard())
-            return "OK",200
-
-        elif action == "unknown_export":
-            if os.path.exists(UNKNOWN_FILE):
-                send_file(chat_id, UNKNOWN_FILE)
-            else:
-                send_message(chat_id,"⚠️ Файлу невідомих слів немає.",get_main_keyboard())
-            return "OK",200
-
-        elif action == "unknown_import":
-            user_states[chat_id]={"action":"import_unknown_file"}
-            send_message(chat_id,"📤 Надішліть файл .txt для імпорту невідомих слів.",get_main_keyboard())
-            return "OK",200
-
-        else:
-            user_states[chat_id]={"action":action,"data":{}}
-            send_message(chat_id,"Введіть дані для дії.",get_main_keyboard())
+        elif action == "translit":
+            user_states[chat_id] = {"action":"translit"}
+            send_message(chat_id,"Введіть текст для транслітерації (можна багаторядково).", get_main_keyboard())
             return "OK",200
 
     # --- Обробка станів ---
-    if state:
+    if state and text:
         action = state["action"]
 
-        # --- Додати / редагувати словник (багаторядково) ---
         if action in ["add","edit"]:
-            pairs = parse_multiline_input(text)
+            pairs = parse_multiline_input_with_category(text)
             reply_lines = []
-            for k,v in pairs:
-                if action=="add":
-                    custom_map[k]=v
+            for cat, k, v in pairs:
+                if cat not in custom_map:
+                    custom_map[cat] = {}
+                if action=="add" or (action=="edit" and k in custom_map[cat]):
+                    custom_map[cat][k]=v
                     remove_unknown(k)
-                    reply_lines.append(f"✅ Додано: *{k}*{SEP}`{v}`")
+                    reply_lines.append(f"{'✅ Додано' if action=='add' else '✏️ Змінено'}: *{k}*{SEP}`{v}` у категорії *{cat}*")
                 else:
-                    if k in custom_map:
-                        custom_map[k]=v
-                        remove_unknown(k)
-                        reply_lines.append(f"✏️ Змінено: *{k}*{SEP}`{v}`")
-                    else:
-                        reply_lines.append(f"⚠️ Слова *{k}* немає в словнику")
+                    reply_lines.append(f"⚠️ Слова *{k}* немає в категорії *{cat}*")
             save_dict()
             user_states.pop(chat_id)
             send_message(chat_id,"\n".join(reply_lines),get_main_keyboard())
             return "OK",200
 
-        # --- Транслітерація ---
-        elif action=="translit":
+        elif action == "translit":
             lines = text.splitlines()
             result_lines = [translit_text_line(l) for l in lines]
             user_states.pop(chat_id)
             send_message(chat_id,"\n".join(result_lines),get_main_keyboard())
             return "OK",200
 
-        # --- Імпорт невідомих ---
-        elif action=="import_unknown_file" and "document" in message:
-            file_id = message["document"]["file_id"]
-            file_info = requests.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={file_id}").json()
-            file_path = file_info["result"]["file_path"]
-            file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-            r = requests.get(file_url)
-            content = r.content.decode("utf-8")
-            for line in content.splitlines():
-                if line.strip():
-                    save_unknown(line)
-            user_states.pop(chat_id)
-            send_message(chat_id,"✅ Імпортовано невідомі слова.",get_main_keyboard())
-            return "OK",200
-
-        # --- Додати вручну невідомі ---
-        elif action=="import_unknown_manual":
-            pairs = parse_multiline_input(text)
-            reply_lines=[]
-            for k,v in pairs:
-                custom_map[k]=v
-                remove_unknown(k)
-                reply_lines.append(f"✅ Додано: *{k}*{SEP}`{v}`")
-            save_dict()
-            user_states.pop(chat_id)
-            send_message(chat_id,"\n".join(reply_lines),get_main_keyboard())
-            return "OK",200
-
     # --- Автоматична транслітерація ---
-    if text:
-        result = translit_text_line(text)
-        send_message(chat_id,result,get_main_keyboard())
+    result_lines = [translit_text_line(text)]
+    send_message(chat_id,"\n".join(result_lines),get_main_keyboard())
     return "OK",200
 
 # === Старт ===
