@@ -88,6 +88,10 @@ def receive_update():
         callback = update["callback_query"]
         chat_id = callback["message"]["chat"]["id"]
         data = callback["data"]
+        callback_id = callback["id"]
+
+        # Підтверджуємо Telegram, щоб кнопка не зависала
+        requests.post(API_URL + "answerCallbackQuery", json={"callback_query_id": callback_id})
 
         if data == "list":
             if custom_map:
@@ -121,13 +125,13 @@ def receive_update():
     # --- Текстові повідомлення ---
     message = update.get("message", {})
     chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "").strip()
+    text = message.get("text", "").strip() if "text" in message else None
 
     if not chat_id or not (text or "document" in message):
         return "No text", 200
 
     # --- /start ---
-    if text.startswith("/start"):
+    if text and text.startswith("/start"):
         send_message(chat_id, "👋 Привіт! Використовуй кнопки для керування словником або надішли слово для транслітерації.", reply_markup=get_main_keyboard())
         return "OK", 200
 
@@ -154,7 +158,7 @@ def receive_update():
         return "OK", 200
 
     # --- Обробка станів ---
-    if state:
+    if state and text:
         action = state["action"]
         reply = ""
 
@@ -169,61 +173,4 @@ def receive_update():
 
         elif action == "edit":
             try:
-                word, translit_word = text.split(maxsplit=1)
-                key = word.lower()
-                if key in custom_map:
-                    custom_map[key] = translit_word.lower()
-                    save_dict()
-                    reply = f"✏️ Змінено: *{word}* → `{translit_word}`"
-                else:
-                    reply = f"⚠️ Слова *{word}* немає в словнику"
-            except Exception:
-                reply = "⚠️ Формат неправильний. Введіть у форматі: `слово translit`"
-
-        elif action == "delete":
-            key = text.lower()
-            if key in custom_map:
-                del custom_map[key]
-                save_dict()
-                reply = f"🗑️ Видалено слово *{text}*"
-            else:
-                reply = f"⚠️ Слова *{text}* немає в словнику"
-
-        elif action == "translit":
-            words = text.split()
-            result_words = []
-            for w in words:
-                lw = w.lower()
-                if lw in custom_map:
-                    result_words.append(custom_map[lw])
-                else:
-                    result_words.append(transliterate(w))
-            translit_text = "_".join(result_words)
-            reply = f"🔤 {text} → `{translit_text}`"
-
-        user_states.pop(chat_id, None)
-        send_message(chat_id, reply)
-        return "OK", 200
-
-    # --- Автоматична транслітерація ---
-    if text:
-        key = text.lower()
-        if key in custom_map:
-            translit = custom_map[key]
-            source = "📘 З твого словника"
-        else:
-            translit = transliterate(text)
-            source = "🤖 Автоматична транслітерація"
-
-        search_url = f"https://t.me/s/{translit}"
-        reply = (
-            f"🔤 *{text}* → `{translit}`\n"
-            f"{source}\n\n"
-            f"🔗 [Пошук у Telegram]({search_url})"
-        )
-        send_message(chat_id, reply)
-
-    return "OK", 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+                word, translit_word = text.split(maxsplit=1
