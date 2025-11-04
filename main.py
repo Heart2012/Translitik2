@@ -63,9 +63,10 @@ def send_message(chat_id, text, reply_markup=None):
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-        "reply_markup": reply_markup
+        "disable_web_page_preview": True
     }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     async_send(API_URL + "sendMessage", payload)
 
 def send_file(chat_id, filename):
@@ -96,7 +97,7 @@ def receive_update():
     if not update:
         return "No update", 400
 
-    print("Received update:", update)  # Debug
+    print("Received update:", update)
 
     # --- Callback кнопки ---
     if "callback_query" in update:
@@ -105,7 +106,7 @@ def receive_update():
         data = callback["data"]
         callback_id = callback["id"]
 
-        # Підтверджуємо Telegram, щоб кнопка не зависала
+        # Підтвердження кнопки
         async_send(API_URL + "answerCallbackQuery", {"callback_query_id": callback_id})
 
         if data == "list":
@@ -235,4 +236,5 @@ def receive_update():
     return "OK", 200
 
 if __name__ == "__main__":
+    # ✅ Важливо: дві закриваючі дужки!
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
