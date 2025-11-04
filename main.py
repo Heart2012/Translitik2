@@ -1,4 +1,3 @@
-@@ -1,238 +1,240 @@
 from flask import Flask, request
 import requests, os, json, re, threading
 
@@ -7,18 +6,19 @@ app = Flask(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 CUSTOM_FILE = "custom.json"
+UNKNOWN_FILE = "unknown.txt"
 
-# --- Завантаження словника ---
+# Завантаження словника
 if os.path.exists(CUSTOM_FILE):
     with open(CUSTOM_FILE, "r", encoding="utf-8") as f:
         custom_map = json.load(f)
 else:
     custom_map = {}
 
-# --- Стан користувачів ---
+# Стан користувачів
 user_states = {}
 
-# --- Транслітерація ---
+# Транслітерація
 TRANSLIT_UA = {'а':'a','б':'b','в':'v','г':'h','ґ':'g','д':'d','е':'e','є':'ye','ж':'zh',
 'з':'z','и':'y','і':'i','ї':'yi','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p',
 'р':'r','с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch',
@@ -47,7 +47,12 @@ def save_dict():
     with open(CUSTOM_FILE, "w", encoding="utf-8") as f:
         json.dump(custom_map, f, ensure_ascii=False, indent=2)
 
-# --- Асинхронна відправка ---
+def save_unknown(words):
+    with open(UNKNOWN_FILE, "a", encoding="utf-8") as f:
+        for w in words:
+            f.write(w + "\n")
+
+# Асинхронна відправка
 def async_send(url, payload=None, files=None):
     def task():
         try:
@@ -66,7 +71,6 @@ def send_message(chat_id, text, reply_markup=None):
         "parse_mode": "Markdown",
         "disable_web_page_preview": True,
         "reply_markup": reply_markup
-        "disable_web_page_preview": True
     }
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
@@ -78,15 +82,13 @@ def send_file(chat_id, filename):
 
 def get_main_keyboard():
     keyboard = {
-        "inline_keyboard": [
-            [{"text": "📚 Переглянути словник", "callback_data": "list"}],
-            [{"text": "➕ Додати слово", "callback_data": "add"}],
-            [{"text": "✏️ Редагувати слово", "callback_data": "edit"}],
-            [{"text": "🗑️ Видалити слово", "callback_data": "delete"}],
-            [{"text": "🔤 Транслітерувати текст", "callback_data": "translit"}],
-            [{"text": "⬇️ Експорт словника", "callback_data": "export"}],
-            [{"text": "⬆️ Імпорт словника", "callback_data": "import"}]
-        ]
+        "keyboard": [
+            ["📚 Словник", "➕ Додати", "✏️ Редагувати"],
+            ["🗑️ Видалити", "🔤 Транслітерація"],
+            ["⬆️ Імпорт", "⬇️ Експорт"]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
     }
     return keyboard
 
@@ -100,63 +102,20 @@ def receive_update():
     if not update:
         return "No update", 400
 
-    print("Received update:", update)  # Debug
-    print("Received update:", update)
-
-    # --- Callback кнопки ---
-    if "callback_query" in update:
-        callback = update["callback_query"]
-        chat_id = callback["message"]["chat"]["id"]
-        data = callback["data"]
-        callback_id = callback["id"]
-
-        # Підтверджуємо Telegram, щоб кнопка не зависала
-        # Підтвердження кнопки
-        async_send(API_URL + "answerCallbackQuery", {"callback_query_id": callback_id})
-
-        if data == "list":
-            if custom_map:
-                lines = [f"*{k}* → `{v}`" for k,v in custom_map.items()]
-                reply = "📚 Словник:\n" + "\n".join(lines)
-            else:
-                reply = "📭 Словник порожній"
-            send_message(chat_id, reply)
-        elif data == "export":
-            if custom_map:
-                filename = "custom_export.txt"
-                with open(filename, "w", encoding="utf-8") as f:
-                    for k,v in custom_map.items():
-                        f.write(f"{k} {v}\n")
-                send_file(chat_id, filename)
-            else:
-                send_message(chat_id, "📭 Словник порожній")
-        else:
-            user_states[chat_id] = {"action": data, "data": {}}
-            action_text = {
-                "add": "Введіть слово та його транслітерацію через пробіл, наприклад:\n`київ kyiv`",
-                "edit": "Введіть слово та нову транслітерацію через пробіл, наприклад:\n`київ kyiv_new`",
-                "delete": "Введіть слово, яке бажаєте видалити",
-                "translit": "Введіть текст для транслітерації",
-                "import": "📤 Надішліть текстовий файл (.txt) зі словником. Формат: `слово translit` на рядок."
-            }
-            send_message(chat_id, action_text.get(data, "Введіть дані для дії"))
-        return "OK", 200
-
-    # --- Текстові повідомлення ---
     message = update.get("message", {})
     chat_id = message.get("chat", {}).get("id")
     text = message.get("text", "").strip() if "text" in message else None
 
-    if not chat_id or not (text or "document" in message):
-        return "No text", 200
+    if not chat_id:
+        return "No chat", 200
 
     if text and text.startswith("/start"):
-        send_message(chat_id, "👋 Привіт! Використовуй кнопки для керування словником або надішли слово для транслітерації.", reply_markup=get_main_keyboard())
+        send_message(chat_id, "👋 Привіт! Користуйся кнопками внизу для керування словником і транслітерації.", reply_markup=get_main_keyboard())
         return "OK", 200
 
     state = user_states.get(chat_id)
 
-    # --- Імпорт файлу ---
+    # Імпорт
     if "document" in message and state and state["action"] == "import":
         file_id = message["document"]["file_id"]
         file_info = requests.get(f"{API_URL}getFile?file_id={file_id}").json()
@@ -176,7 +135,7 @@ def receive_update():
         send_message(chat_id, f"✅ Імпортовано {added} слів зі словника")
         return "OK", 200
 
-    # --- Обробка станів ---
+    # Обробка станів
     if state and text:
         action = state["action"]
         reply = ""
@@ -225,7 +184,7 @@ def receive_update():
         send_message(chat_id, reply)
         return "OK", 200
 
-    # --- Автоматична транслітерація ---
+    # Автоматична транслітерація
     if text:
         key = text.lower()
         if key in custom_map:
@@ -241,5 +200,4 @@ def receive_update():
     return "OK", 200
 
 if __name__ == "__main__":
-    # ✅ Важливо: дві закриваючі дужки!
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
