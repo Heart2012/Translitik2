@@ -4,17 +4,17 @@ import re
 import requests
 from flask import Flask, request
 
-# === Налаштування ===
 TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN"
+PORT = int(os.getenv("PORT", 10000))
 CUSTOM_DICT_FILE = "custom_dict.json"
 UNKNOWN_FILE = "unknown_words.txt"
-SEP = "="  # роздільник для словника, можна змінити
+SEP = "="  # роздільник для словника
 
 app = Flask(__name__)
 user_states = {}  # стан користувачів
 custom_map = {}   # словник за категоріями
 
-# === Завантаження словника ===
+# --- Завантаження словника ---
 def load_dict():
     global custom_map
     if os.path.exists(CUSTOM_DICT_FILE):
@@ -24,7 +24,12 @@ def load_dict():
         custom_map = {}
 load_dict()
 
-# === Невідомі слова/фрази ===
+# --- Збереження словника ---
+def save_dict():
+    with open(CUSTOM_DICT_FILE, "w", encoding="utf-8") as f:
+        json.dump(custom_map, f, ensure_ascii=False, indent=2)
+
+# --- Невідомі слова ---
 def save_unknown(word):
     word = word.strip().lower()
     if not word:
@@ -32,7 +37,7 @@ def save_unknown(word):
     existing = set()
     if os.path.exists(UNKNOWN_FILE):
         with open(UNKNOWN_FILE, "r", encoding="utf-8") as f:
-            existing = {w.strip().lower() for w in f.readlines()}
+            existing = {l.strip().lower() for l in f}
     if word not in existing:
         with open(UNKNOWN_FILE, "a", encoding="utf-8") as f:
             f.write(word + "\n")
@@ -52,12 +57,7 @@ def clear_unknown():
     if os.path.exists(UNKNOWN_FILE):
         open(UNKNOWN_FILE, "w", encoding="utf-8").close()
 
-# === Збереження словника ===
-def save_dict():
-    with open(CUSTOM_DICT_FILE, "w", encoding="utf-8") as f:
-        json.dump(custom_map, f, ensure_ascii=False, indent=2)
-
-# === Транслітерація (Українська) ===
+# --- Транслітерація (укр) ---
 TRANSLIT_UA = {
     "а":"a","б":"b","в":"v","г":"h","ґ":"g","д":"d","е":"e","є":"ie",
     "ж":"zh","з":"z","и":"y","і":"i","ї":"i","й":"i","к":"k","л":"l",
@@ -65,24 +65,23 @@ TRANSLIT_UA = {
     "ф":"f","х":"kh","ц":"ts","ч":"ch","ш":"sh","щ":"shch","ь":"",
     "ю":"iu","я":"ia"
 }
+
 def transliterate(text):
     return "".join(TRANSLIT_UA.get(c.lower(), c) for c in text)
 
-# === Клавіатура ===
+# --- Клавіатура ---
 def get_main_keyboard():
     keyboard = {
         "keyboard":[
             ["🔤 Транслітерація", "📚 Словник"],
             ["➕ Додати", "✏️ Редагувати", "🗑️ Видалити"],
             ["⬇️ Експорт", "⬆️ Імпорт"],
-            ["⚠️ Невідомі слова","📥 Додати невідомі у словник","📤 Скинути всі невідомі"],
-            ["📤 Експорт невідомих","📥 Імпорт невідомих"]
+            ["⚠️ Невідомі слова","📥 Додати невідомі у словник","📤 Скинути всі невідомі"]
         ],
         "resize_keyboard": True
     }
     return keyboard
 
-# === Інлайн-кнопки категорій ===
 def get_category_buttons():
     buttons = []
     for cat in custom_map.keys():
@@ -90,7 +89,7 @@ def get_category_buttons():
     buttons.append([{"text": "➕ Нова категорія", "callback_data": "cat_new"}])
     return {"inline_keyboard": buttons}
 
-# === Відправка повідомлень ===
+# --- Відправка повідомлень ---
 def send_message(chat_id, text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -103,7 +102,7 @@ def send_file(chat_id, filename):
     with open(filename, "rb") as f:
         requests.post(url, data={"chat_id": chat_id}, files={"document": f})
 
-# === Парсинг багаторядкового вводу для словника з категорією ===
+# --- Парсинг багаторядкового вводу для словника ---
 # Формат рядка: Категорія Слово=трансліт
 def parse_multiline_input_with_category(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -115,7 +114,7 @@ def parse_multiline_input_with_category(text):
             parsed.append((cat.strip(), word.strip().lower(), translit_word.strip()))
     return parsed
 
-# === Трансліт рядка з перевіркою словника та склеєних слів ===
+# --- Трансліт рядка з перевіркою словника ---
 def translit_text_line(text):
     lw = text.lower()
     result = ""
@@ -145,13 +144,13 @@ def translit_text_line(text):
             i += 1
     return result
 
-# === Основний вебхук ===
+# --- Основний webhook ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = request.get_json()
     message = update.get("message", {})
-    text = message.get("text", "").strip()
     chat_id = message.get("chat", {}).get("id")
+    text = message.get("text", "").strip()
     if not chat_id or not text:
         return "No message", 200
 
@@ -168,9 +167,7 @@ def webhook():
         "⬆️ Імпорт":"import",
         "⚠️ Невідомі слова":"unknown",
         "📤 Скинути всі невідомі":"unknown_clear",
-        "📥 Додати невідомі у словник":"import_unknown_manual",
-        "📤 Експорт невідомих":"unknown_export",
-        "📥 Імпорт невідомих":"unknown_import"
+        "📥 Додати невідомі у словник":"import_unknown_manual"
     }
 
     if text in buttons:
@@ -241,18 +238,16 @@ def webhook():
     send_message(chat_id,"\n".join(result_lines),get_main_keyboard())
     return "OK",200
 
-# === Callback для інлайн кнопок (категорії) ===
-@app.route(f"/callback", methods=["POST"])
-def callback_webhook():
+# --- Callback для категорій ---
+@app.route("/callback", methods=["POST"])
+def callback():
     update = request.get_json()
-    if "callback_query" not in update:
-        return "OK",200
-    callback = update["callback_query"]
-    chat_id = callback["message"]["chat"]["id"]
-    data = callback["data"]
-    callback_id = callback["id"]
+    callback = update.get("callback_query", {})
+    chat_id = callback.get("message",{}).get("chat",{}).get("id")
+    data = callback.get("data","")
+    callback_id = callback.get("id","")
 
-    # Підтвердження Telegram
+    # підтвердження кнопки
     requests.post(f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery", json={"callback_query_id": callback_id})
 
     state = user_states.get(chat_id)
@@ -276,35 +271,10 @@ def callback_webhook():
         user_states.pop(chat_id,None)
     return "OK",200
 
-# === Введення нової категорії вручну ===
-@app.route(f"/manual_category", methods=["POST"])
-def manual_category_webhook():
-    update = request.get_json()
-    message = update.get("message",{})
-    chat_id = message.get("chat",{}).get("id")
-    text = message.get("text","").strip()
-    state = user_states.get(chat_id)
-    if state and state.get("action")=="import_unknown_category" and state.get("waiting_for_new_cat") and text:
-        cat_name = text.strip()
-        if cat_name:
-            added = 0
-            if cat_name not in custom_map:
-                custom_map[cat_name] = {}
-            for w in state["words"]:
-                custom_map[cat_name][w] = transliterate(w)
-                remove_unknown(w)
-                added +=1
-            save_dict()
-            send_message(chat_id,f"✅ Додано {added} невідомих слів у нову категорію *{cat_name}*.", get_main_keyboard())
-        else:
-            send_message(chat_id,"⚠️ Назва категорії не може бути порожньою.")
-        user_states.pop(chat_id,None)
-    return "OK",200
-
-# === Старт ===
-@app.route("/",methods=["GET"])
+# --- Старт ---
+@app.route("/", methods=["GET"])
 def index():
     return "✅ Transliteration bot is running!"
 
 if __name__=="__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT",10000)))
+    app.run(host="0.0.0.0", port=PORT)
